@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+
+"""
+The MIT License (MIT)
+Copyright (c) 2020 Carl Londahl
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
+"""
+
+import os
+import sys
+import time
+import asyncio
+import evdev
+import math
+import xdo
+
+
+# my device name
+DEVICE_NAME = "Carls styrplatta"
+
+''''
+class KdeEventHandler:
+
+    from PyQt5 import QtDBus
+
+    def __init__(self):
+        # this is a ugly hack
+        self.bus = QtDBus.QDBusConnection.sessionBus()
+        self.interface = QtDBus.QDBusInterface(
+            "org.kde.kglobalaccel",
+            "/component/kwin",
+            "org.kde.kglobalaccel.Component",
+            bus
+        )
+        self.kwin = QtDBus.QDBusInterface(
+            "org.kde.KWin",
+            "/Effects",
+            "org.kde.kwin.Effects",
+            self.bus
+        )
+
+        if not (self.interface.isValid() and self.kwin.isValid()):
+            print("Kwin interface error.")
+
+        self.mapping = {
+            TouchpadStateMachine.SWIPE_FOUR_LEFT:  self.previous_desktop,
+            TouchpadStateMachine.SWIPE_FOUR_RIGHT: self.next_desktop,
+            TouchpadStateMachine.SWIPE_FOUR_UP:    self.show_desktop_grid,
+            TouchpadStateMachine.SWIPE_FOUR_DOWN:  self.show_desktop,
+        }
+
+    def handle(self, code):
+        if not self.interface.isValid():
+            print("Invalid Kwin interface.")
+            return
+        if code in self.mapping:
+            self.mapping.get(code)()
+
+    def check_status(self, effect):
+        effects = check_output(["qdbus", "org.kde.KWin", "/Effects", "activeEffects"]).split()
+        return effect in effects
+
+    def show_desktop_grid(self):
+        if check_status("kwin4_effect_windowaperture"):
+            self.kwin.call("toggleEffect", "kwin4_effect_windowaperture")
+        if not check_status("desktopgrid"):
+            return self.interface.call("invokeShortcut", "ShowDesktopGrid")
+
+    def show_desktop(self):
+        if check_status("desktopgrid"):
+            self.kwin.call("toggleEffect", "desktopgrid")
+        if not check_status("kwin4_effect_windowaperture"):
+            return self.interface.call("invokeShortcut", "Show Desktop")
+
+    def next_desktop(self):
+        return self.interface.call("invokeShortcut", "Switch to Next Desktop")
+
+    def previous_desktop(self):
+        return self.interface.call("invokeShortcut", "Switch to Previous Desktop")
+
+'''
+
+class EventHandler:
+
+    def __init__(self):
+        self.hid = xdo.Xdo()
+        self.key_mapping = {
+            TouchpadStateMachine.SWIPE_FOUR_LEFT:  [b"Control_L+Shift_L+Left"],
+            TouchpadStateMachine.SWIPE_FOUR_RIGHT: [b"Control_L+Shift_L+Right"],
+            TouchpadStateMachine.SWIPE_FOUR_DOWN:  [b"Escape", b"Super_L+d"],
+            TouchpadStateMachine.SWIPE_FOUR_UP:    [b"Escape", b"Super_L+Tab"],
+            TouchpadStateMachine.SWIPE_THREE_UP:   [b"Control_L+F10"],
+        }
+        self.mouse_mapping = {
+            TouchpadStateMachine.SWIPE_THREE_LEFT:  [8],
+            TouchpadStateMachine.SWIPE_THREE_RIGHT: [9],
+            TouchpadStateMachine.SWIPE_THREE_DOWN:  [],
+        }
+
+    def sendkeys(self, keys):
+        for k in keys:
+            self.hid.send_keysequence_window(0, k)
+
+    def sendbutton(self, buttons):
+        for k in buttons:
+            self.hid.mouse_down(0, k)
+            self.hid.mouse_up(0, k)
+
+    def handle(self, code):
+        if code in self.key_mapping:
+            self.sendkeys(self.key_mapping.get(code))
+        elif code in self.mouse_mapping:
+            self.sendbutton(self.mouse_mapping.get(code))
+
+
+class TouchpadStateMachine:
+
+    # libinput tokens
+    T_SYN_REPORT = 0
+    T_EV_KEY = 1
+    T_EV_ABS = 3
+    C_ABS_MT_SLOT = 47
+    C_ABS_MT_POSITION_X = 53
+    C_ABS_MT_POSITION_Y = 54
+    C_BTN_TOOL_FINGER = 325
+    C_BTN_TOOL_TRIPLETAP = 334
+
+    # hardcoded settings, these can be modified
+    # for different behavior and devices
+    TIMEOUT = 1e5
+    # trade-offs between responsiveness and accuracy
+    WINDOW_SIZE = 1
+    THRESHOLD = 1
+
+    # defined gestures
+    SWIPE_THREE_LEFT = 30
+    SWIPE_THREE_RIGHT = 31
+    SWIPE_THREE_DOWN = 32
+    SWIPE_THREE_UP = 33
+    SWIPE_FOUR_LEFT = 40
+    SWIPE_FOUR_RIGHT = 41
+    SWIPE_FOUR_DOWN = 42
+    SWIPE_FOUR_UP = 43
+    SWIPE_NOP = -1
+
+    def __init__(self):
+        self.eventhandler = EventHandler()
+        self.vector = Vector(0,0)
+        self.reset()
+
+    def reset(self):
+        self.time = 0
+        self.sample_x = [0,0,0,0]
+        self.sample_y = [0,0,0,0]
+        self.vector.x, self.vector.y = 0, 0
+        self.points = [0,0]
+        self.swipe = None
+        self.sequence = 0
+        self.code = None
+        self.seq = 0
+
+    def update(self, time):
+        self.time = time
+
+    def timeout(self, new_time):
+        if new_time - self.time > self.TIMEOUT:
+            self.reset()
+
+    def assign(self, x, y):
+        if abs(x) < TouchpadStateMachine.THRESHOLD or abs(y) < TouchpadStateMachine.THRESHOLD:
+            return TouchpadStateMachine.SWIPE_NOP
+        elif abs(y) > abs(x):
+            if y > 0:
+                return TouchpadStateMachine.SWIPE_FOUR_DOWN
+            return TouchpadStateMachine.SWIPE_FOUR_UP
+        else:
+            if x > 0:
+                return TouchpadStateMachine.SWIPE_FOUR_LEFT
+            return TouchpadStateMachine.SWIPE_FOUR_RIGHT
+
+    def handle(self, event):
+        if event.type == TouchpadStateMachine.T_SYN_REPORT:
+            if self.points == [0,0] and self.code is not None:
+                self.eventhandler.handle(self.code)
+                self.code = None
+            elif self.points in ([3,3], [4,4]):
+                # compute canonical vector
+                normalized = self.assign(self.vector.x, self.vector.y)
+                fingers = self.points[0]
+                # check if swipe is equal to previous
+                if self.swipe != normalized:
+                    self.swipe = normalized
+                    self.fingers = fingers
+                    self.seq = 0
+                # increment sequence length, i.e. , count number of
+                # of approximately equal operations in sequence
+                self.seq += 1
+                # if sequence is long enough, mark it as done
+                # and produce a swipe code
+                if self.seq > TouchpadStateMachine.WINDOW_SIZE:
+                    self.code = self.swipe
+                    # we don't care about 3 or 4 fingers
+                    # which yields a better experience
+                    #if self.points == [3,3]:
+                    #    self.code -= 10
+            # clear
+            self.vector.x, self.vector.y = 0, 0
+            self.points = [0,0]
+        elif event.type == TouchpadStateMachine.T_EV_ABS:
+            # put respective fingers at the correct position...
+            if event.code == TouchpadStateMachine.C_ABS_MT_SLOT:
+                pass
+            # ...and record their corresponding coords, both x...
+            elif event.code == TouchpadStateMachine.C_ABS_MT_POSITION_X:
+                if self.swipe is not None:
+                    self.vector.x = (event.value - self.sample_x[self.points[0]])
+                self.sample_x[self.points[0]] = event.value
+                self.points[0] += 1
+            # ...and y coords
+            elif event.code == TouchpadStateMachine.C_ABS_MT_POSITION_Y:
+                if self.swipe is not None:
+                    self.vector.y = (event.value - self.sample_y[self.points[1]])
+                self.sample_y[self.points[1]] = event.value
+                self.points[1] += 1              
+
+
+class TouchpadConnector:
+
+    def __init__(self):
+        self.device = None
+
+        print("Looking for device %s..." % DEVICE_NAME)
+
+        while self.device is None:
+            for device in evdev.list_devices():
+                if evdev.InputDevice(device).name == DEVICE_NAME:
+                    self.device = device
+                    break
+            time.sleep(5)
+
+        print("Found device %s on %s" % (DEVICE_NAME, self.device))
+
+        self.touchpad = evdev.InputDevice(self.device)
+        asyncio.ensure_future(self.handle_events(self.touchpad))
+        self.statemachine = TouchpadStateMachine()
+
+    async def handle_events(self, device):
+        self.statemachine.reset()
+        async for event in device.async_read_loop():
+            new_time = event.usec + 1e6 * event.sec
+            self.statemachine.timeout(new_time)
+            self.statemachine.update(new_time)
+            self.statemachine.handle(event)
+
+    def run(self):
+        try:
+            loop = asyncio.get_event_loop()
+            loop.run_forever()
+        except KeyboardInterrupt:
+            print("Exited due to interrupt signal.")
+        except Exception as e:
+            print("error: %s" % str(e), file=sys.stderr)
+
+
+class Vector:
+
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+
+
+if __name__ == '__main__':
+    tc = TouchpadConnector()
+    tc.run()
