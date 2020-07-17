@@ -1,0 +1,238 @@
+
+#!/usr/bin/env python3
+
+FFMPEG_BIN = "ffmpeg" # on Linux
+#FFMPEG_BIN = "ffmpeg.exe" # on Windows
+import pyaudio
+import sys
+import subprocess as sp
+import time
+import numpy
+import pytube
+
+import curses
+from PIL import Image
+from io import BytesIO
+
+from urllib.request import urlopen
+from ctypes import *
+from contextlib import contextmanager
+
+BLOCK = chr(9608)
+SIZE = 33
+
+def crop_center(image, crop_width, crop_height):
+    img_width, img_height = image.size
+    return image.crop((
+        (img_width - crop_width) // 2,
+        (img_height - crop_height) // 2,
+        (img_width + crop_width) // 2,
+        (img_height + crop_height) // 2
+    ))
+
+def crop_max_square(image):
+    
+    return crop_center(image, min(image.size), min(image.size))
+
+def transform(image, size):
+    return crop_max_square(image).resize((size, size//2), Image.LANCZOS)
+
+def rgb(r, g, b):
+    if r == g and g == b:
+        if r < 8:
+            return 16
+        if r > 248:
+            return 231
+        return round(((r - 8) / 247) * 24) + 232
+
+    ansi = 16 + (36 * round(r / 255 * 5)) + \
+        (6 * round(g / 255 * 5)) + round(b / 255 * 5)
+    return ansi
+
+def split_title(title, width):
+    splits = title.split(" ")
+    
+    out = []
+    i = 0
+    while i < len(splits):
+        cur = splits[i]
+        i += 1
+        while i < len(splits):
+            m = " ".join([cur, splits[i]])
+            if len(m) < width:
+                cur = m
+            else:
+                break
+            i += 1
+        out += [cur.center(width)]
+    return out
+
+ERROR_HANDLER_FUNC = CFUNCTYPE(None, c_char_p, c_int, c_char_p, c_int, c_char_p)
+
+def py_error_handler(filename, line, function, err, fmt):
+    pass
+
+c_error_handler = ERROR_HANDLER_FUNC(py_error_handler)
+
+@contextmanager
+def noalsaerr():
+    asound = cdll.LoadLibrary('libasound.so')
+    asound.snd_lib_error_set_handler(c_error_handler)
+    yield
+    asound.snd_lib_error_set_handler(None)
+
+
+class Player:
+    
+    def __init__(self, uid, screen):
+
+        base = "https://www.youtube.com/watch?v="
+
+        yt = pytube.YouTube(base + uid)
+        url = (yt.streams
+            .filter(progressive=True, file_extension='mp4')
+            .order_by('resolution')
+            .desc()
+            .first()
+            .url
+        )
+
+        self.screen = screen
+        self.albumart = yt.thumbnail_url
+        self.title = yt.title
+        self.paused = False
+        self.fft = []
+
+        self.command = [
+            FFMPEG_BIN,
+            '-i', url,
+            "-v",
+            "fatal", 
+            "-hide_banner", 
+            "-nostdin",
+            '-acodec', 'pcm_s32le',
+            '-f', 's32le',
+            '-ar', '44100', # ouput will have 44100 Hz
+            '-ac', '2', # stereo (set to '1' for mono)
+            '-'
+        ]
+    
+    def play(self):
+        
+        def callback(in_data, frame_count, time_info, status):
+            data = self.pipe.stdout.read(8192)
+            data = numpy.frombuffer(data, dtype="int32")
+            data = data.reshape((len(data)//2,2))
+            return (data, pyaudio.paContinue)
+
+        self.pipe = sp.Popen(self.command, stdout=sp.PIPE, bufsize=10**8)
+        
+        with noalsaerr():
+            # instantiate PyAudio (1)
+            self.p = pyaudio.PyAudio()
+
+        # open stream using callback (3)
+        self.stream = self.p.open(
+            format=pyaudio.paInt32,
+            channels=2,
+            rate=44100,
+            output=True,
+            stream_callback=callback
+        )
+
+        # start the stream (4)
+        self.stream.start_stream()
+        
+        # wait for stream to finish (5)
+        while self.stream.is_active() or self.paused:
+            #self.screen.addstr(0, 0, "/")
+            #self.screen.refresh()
+            time.sleep(1)
+            
+        self.stop()
+    
+    def stop(self):
+        
+        # stop stream (6)
+        self.stream.stop_stream()
+        self.stream.close()
+    
+        # close PyAudio (7)
+        self.p.terminate()
+    
+    def togglePause():
+        if self.paused:
+            self.stream.stop_stream()
+            self.paused = True
+        else:
+            stream.start_stream()
+            self.paused = False
+    
+    def getTitle(self):
+        return self.title
+    
+    def getAlbumart(self):
+        return urlopen(self.albumart).read()
+
+
+
+
+import argparse
+from curses import wrapper
+
+parser = argparse.ArgumentParser()
+parser.add_argument("ids", help="Youtube IDs.", nargs="+")
+args = parser.parse_args()
+
+def main(stdscr):
+    
+    def draw(image, screen, size, offset):
+        image = transform(image, size)
+        art = list(rgb(r,g,b) for r,g,b in image.getdata())
+        try:
+            for i in range(size//2):
+                for j in range(size):
+                    stdscr.addstr(
+                        offset + i, 
+                        offset + j, 
+                        BLOCK,
+                        curses.color_pair(art[size*i + j])
+                    )
+        except curses.ERR:
+            pass
+    
+    def drawTitle(title, screen, x_offset, y_offset, height, width):
+        title = split_title(title, width)
+        y_offset -= len(title) // 2
+        for i, block in enumerate(title):
+            for j in range(len(block)):
+                stdscr.addstr(
+                    x_offset + i,
+                    y_offset + j,
+                    block[j],
+                    curses.color_pair(0)
+                )
+    
+    curses.start_color()
+    curses.use_default_colors()
+    curses.curs_set(0)
+    rows, cols = stdscr.getmaxyx()
+    
+    for i in range(0, curses.COLORS):
+        curses.init_pair(i + 1, i, -1)
+    
+    try:
+        for uid in args.ids:
+            p = Player(uid, stdscr)
+            image = Image.open(BytesIO(p.getAlbumart())).convert('RGB')
+            drawTitle(p.getTitle(), stdscr, SIZE//4-1, SIZE + 5, SIZE, cols - SIZE - 5)
+            draw(image, stdscr, SIZE, 0)
+            stdscr.refresh()
+            p.play()
+
+        stdscr.getch()
+    except:
+        pass
+        
+
+curses.wrapper(main)
