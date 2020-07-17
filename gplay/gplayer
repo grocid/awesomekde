@@ -128,10 +128,8 @@ class Player:
         self.pipe = sp.Popen(self.command, stdout=sp.PIPE, bufsize=10**8)
         
         with noalsaerr():
-            # instantiate PyAudio (1)
             self.p = pyaudio.PyAudio()
 
-        # open stream using callback (3)
         self.stream = self.p.open(
             format=pyaudio.paInt32,
             channels=2,
@@ -140,10 +138,8 @@ class Player:
             stream_callback=callback
         )
 
-        # start the stream (4)
         self.stream.start_stream()
         
-        # wait for stream to finish (5)
         while self.stream.is_active() or self.paused:
             #self.screen.addstr(0, 0, "/")
             #self.screen.refresh()
@@ -152,12 +148,8 @@ class Player:
         self.stop()
     
     def stop(self):
-        
-        # stop stream (6)
         self.stream.stop_stream()
         self.stream.close()
-    
-        # close PyAudio (7)
         self.p.terminate()
     
     def togglePause():
@@ -219,7 +211,7 @@ def main(stdscr):
     rows, cols = stdscr.getmaxyx()
     
     for i in range(0, curses.COLORS):
-        curses.init_pair(i + 1, i, -1)
+        curses.init_pair(i, i, -1)
     
     try:
         for uid in args.ids:
