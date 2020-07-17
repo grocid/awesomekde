@@ -1,0 +1,6 @@
+#!/bin/bash
+
+ip=`echo $SSH_CONNECTION | cut -d " " -f 1`
+hostname=`hostname`
+
+notify-send SSH "$USER@$hostname login $ip"

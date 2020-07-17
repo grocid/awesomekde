@@ -8,14 +8,15 @@ sudo apt install latte-dock git curl
 sudo apt install zsh
 sudo chsh -s $(which zsh)
 
-echo "Installing firewall and openssh server..."
-sudo apt install ufw openssh-server
-
 echo "Setting up Bonjour..."
 sudo apt install avahi-daemon avahi-discover libnss-mdns
 
+echo "Installing firewall and openssh server..."
+sudo apt install ufw openssh-server
+
 echo "Setting up UFW"
 ./setup-ufw.sh
+sudo ufw enable
 
 echo "Setting up audio..."
 ./setup-audio.sh
@@ -23,4 +24,4 @@ echo "Setting up audio..."
 echo "Applying UI patches for plasmoids..."
 ./setup-ui-patches.sh
 
-sudo apt install neofetchN
+sudo apt install neofetch
