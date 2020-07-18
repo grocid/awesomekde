@@ -17,7 +17,7 @@ from contextlib import contextmanager
 
 FFMPEG_BIN = "ffmpeg"
 BLOCK = chr(9608)
-SIZE = 33
+SIZE = 80
 
 def crop_center(image, crop_width, crop_height):
     img_width, img_height = image.size
@@ -216,8 +216,9 @@ def main(stdscr):
         for uid in args.ids:
             p = Player(uid, stdscr)
             image = Image.open(BytesIO(p.getAlbumart())).convert('RGB')
-            drawTitle(p.getTitle(), stdscr, SIZE//4-2, SIZE + 5, SIZE, cols - SIZE - 5)
-            draw(image, stdscr, SIZE, 0)
+            size = min(min(SIZE, cols), 2*rows)
+            drawTitle(p.getTitle(), stdscr, size//4-2, size + 5, size, cols - size - 5)
+            draw(image, stdscr, size, 0)
             stdscr.refresh()
             p.play()
 
