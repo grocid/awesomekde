@@ -1,16 +1,19 @@
 #!/usr/bin/python3
 
 import pyaudio
+import os
 import sys
 import subprocess as sp
 import time
 import numpy
 import pytube
-
+import threading
 import curses
+import argparse
+
+from curses import wrapper
 from PIL import Image
 from io import BytesIO
-
 from urllib.request import urlopen
 from ctypes import *
 from contextlib import contextmanager
@@ -18,6 +21,105 @@ from contextlib import contextmanager
 FFMPEG_BIN = "ffmpeg"
 BLOCK = chr(9608)
 SIZE = 80
+
+class Player:
+    
+    def __init__(self, uid, screen):
+
+        base = "https://www.youtube.com/watch?v="
+
+        yt = pytube.YouTube(base + uid)
+        url = (yt.streams
+            .filter(progressive=True, file_extension='mp4')
+            .order_by('resolution')
+            .desc()
+            .first()
+            .url
+        )
+
+        self.screen = screen
+        self.albumart = yt.thumbnail_url
+        self.length = yt.length
+        self.title = yt.title
+        self.paused = False
+        self.time = 0
+
+        self.command = [
+            FFMPEG_BIN,
+            '-i', url,
+            "-v",
+            "fatal", 
+            "-hide_banner", 
+            "-nostdin",
+            '-acodec', 'pcm_s32le',
+            '-f', 's32le',
+            '-ar', '44100', # ouput will have 44100 Hz
+            '-ac', '2', # stereo (set to '1' for mono)
+            '-'
+        ]
+    
+    def play(self):
+        
+        def callback(in_data, frame_count, time_info, status):
+            data = self.pipe.stdout.read(8192)
+            data = numpy.frombuffer(data, dtype="int32")
+            data = data.reshape((len(data)//2, 2))
+            return (data, pyaudio.paContinue)
+
+        self.pipe = sp.Popen(self.command, stdout=sp.PIPE, bufsize=10**8)
+        
+        with noalsaerr():
+            self.p = pyaudio.PyAudio()
+
+        self.stream = self.p.open(
+            format=pyaudio.paInt32,
+            channels=2,
+            rate=44100,
+            output=True,
+            stream_callback=callback
+        )
+
+        self.stream.start_stream()
+        
+        while self.stream.is_active() or self.paused:
+            if not self.paused:
+                m, s = divmod(self.time, 60)
+                h, m = divmod(m, 60)
+                self.time += 1
+                self.screen.addstr(
+                    SIZE//8,
+                    SIZE//4,
+                    ("{:02d}:{:02d}:{:02d}/{:d}"
+                     .format(h, m, s, self.length)
+                     .center(SIZE))
+                )
+                self.screen.refresh()
+            time.sleep(1)
+            
+        self.stop()
+        self.terminate()
+
+    def stop(self):
+        self.stream.stop_stream()
+    
+    def terminate(self):
+        self.stream.close()
+        self.p.terminate()
+        self.pipe.terminate()
+        
+    def togglePause(self):
+        if self.paused:
+            self.stream.start_stream()
+            self.paused = False
+        else:
+            self.stream.stop_stream()
+            self.paused = True
+    
+    def getTitle(self):
+        return self.title
+    
+    def getAlbumart(self):
+        return urlopen(self.albumart).read()
 
 def crop_center(image, crop_width, crop_height):
     img_width, img_height = image.size
@@ -79,98 +181,6 @@ def noalsaerr():
     yield
     asound.snd_lib_error_set_handler(None)
 
-
-class Player:
-    
-    def __init__(self, uid, screen):
-
-        base = "https://www.youtube.com/watch?v="
-
-        yt = pytube.YouTube(base + uid)
-        url = (yt.streams
-            .filter(progressive=True, file_extension='mp4')
-            .order_by('resolution')
-            .desc()
-            .first()
-            .url
-        )
-
-        self.screen = screen
-        self.albumart = yt.thumbnail_url
-        self.title = yt.title
-        self.paused = False
-        self.fft = []
-
-        self.command = [
-            FFMPEG_BIN,
-            '-i', url,
-            "-v",
-            "fatal", 
-            "-hide_banner", 
-            "-nostdin",
-            '-acodec', 'pcm_s32le',
-            '-f', 's32le',
-            '-ar', '44100', # ouput will have 44100 Hz
-            '-ac', '2', # stereo (set to '1' for mono)
-            '-'
-        ]
-    
-    def play(self):
-        
-        def callback(in_data, frame_count, time_info, status):
-            data = self.pipe.stdout.read(8192)
-            data = numpy.frombuffer(data, dtype="int32")
-            self.data = data
-            data = data.reshape((len(data)//2,2))
-            return (data, pyaudio.paContinue)
-
-        self.pipe = sp.Popen(self.command, stdout=sp.PIPE, bufsize=10**8)
-        
-        with noalsaerr():
-            self.p = pyaudio.PyAudio()
-
-        self.stream = self.p.open(
-            format=pyaudio.paInt32,
-            channels=2,
-            rate=44100,
-            output=True,
-            stream_callback=callback
-        )
-
-        self.stream.start_stream()
-        
-        while self.stream.is_active() or self.paused:
-            #self.screen.addstr(SIZE//4-1, SIZE, "x")
-            #self.screen.refresh()
-            time.sleep(1)
-            
-        self.stop()
-    
-    def stop(self):
-        self.stream.stop_stream()
-        self.stream.close()
-        self.p.terminate()
-    
-    def togglePause():
-        if self.paused:
-            self.stream.stop_stream()
-            self.paused = True
-        else:
-            stream.start_stream()
-            self.paused = False
-    
-    def getTitle(self):
-        return self.title
-    
-    def getAlbumart(self):
-        return urlopen(self.albumart).read()
-
-
-
-
-import argparse
-from curses import wrapper
-
 parser = argparse.ArgumentParser()
 parser.add_argument("ids", help="IDs.", nargs="+")
 args = parser.parse_args()
@@ -208,24 +218,47 @@ def main(stdscr):
     curses.use_default_colors()
     curses.curs_set(0)
     rows, cols = stdscr.getmaxyx()
+    size = min(min(SIZE, cols), 2 * rows)
     
     for i in range(0, curses.COLORS):
         curses.init_pair(i, i, -1)
     
+    p = None
+    
+    def ui_thread():
+        while True:
+            c = stdscr.getch()
+            if c == ord('p'):
+                p.togglePause()
+            elif c == ord('n'):
+                p.stop()
+        
+
+    ui = threading.Thread(target=ui_thread, args=())
+    ui.start()
+    
     try:
         for uid in args.ids:
             p = Player(uid, stdscr)
+            
             image = Image.open(BytesIO(p.getAlbumart())).convert('RGB')
-            size = min(min(SIZE, cols), 2*rows)
-            drawTitle(p.getTitle(), stdscr, size//4-2, size + 5, size, cols - size - 5)
-            draw(image, stdscr, size, 0)
+            
+            drawTitle(p.getTitle(), stdscr, SIZE//4 - 2, SIZE + 5, SIZE, cols - SIZE - 5)
+            draw(image, stdscr, SIZE, 0)
             stdscr.refresh()
+            
             p.play()
-
-        stdscr.getch()
+            p.terminate()
+            
+    except KeyboardInterrupt:
         curses.endwin()
-    except:
-        pass
+        os._exit(0)
+    except Exception as e:
+        print(e)
+    finally:
+        curses.endwin()
+        print("bye")
+        
         
 
 curses.wrapper(main)

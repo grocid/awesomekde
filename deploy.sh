@@ -3,7 +3,7 @@
 sudo apt update
 sudo apt upgrade
 
-sudo apt install latte-dock git curl
+sudo apt install latte-dock git curl zsh
 
 sudo apt install zsh
 sudo chsh -s $(which zsh)
@@ -23,5 +23,3 @@ echo "Setting up audio..."
 
 echo "Applying UI patches for plasmoids..."
 ./setup-ui-patches.sh
-
-sudo apt install neofetch

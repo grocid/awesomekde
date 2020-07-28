@@ -1,8 +1,10 @@
 
 PORT=22
 
-echo "Setting up UFW rules for port $PORT and for $(hostname -I)"
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
 
+echo "Setting up UFW rules for port $PORT and for $(hostname -I)"
 for IP in $(hostname -I)
 do
 	IPMASK=$(echo $IP | awk -F"." '{print $1"."$2"."$3".0/24"}')
